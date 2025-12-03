@@ -26,9 +26,14 @@ func (c *categoryUC) Create(ctx context.Context, category domain.Category) (int,
 	var categoryID int
 
 	err = c.repo.WithTransaction(ctx, func(dataStore database.PSQLDBStore) error {
-		id, err := dataStore.Create(ctx, category)
+		id, err := dataStore.CategoryRepo().Create(ctx, category)
 		if err != nil {
 			return 0, err
+		}
+
+		err = dataStore.TagRepo().Create(ctx)
+		if err != nil {
+			return err
 		}
 
 		categoryID = id
