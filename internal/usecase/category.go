@@ -3,8 +3,8 @@ package usecase
 import (
 	"context"
 
+	"github.com/Akmyrat03/shop/internal/database"
 	"github.com/Akmyrat03/shop/internal/domain"
-	"github.com/Akmyrat03/shop/internal/repository/postgres"
 )
 
 var _ CategoryUC = (*categoryUC)(nil)
@@ -14,18 +14,30 @@ type CategoryUC interface {
 }
 
 type categoryUC struct {
-	repo postgres.CategoryRepository
+	repo database.PSQLDBStore
 }
 
-func NewCategoryUC(repo postgres.CategoryRepository) *categoryUC {
+func NewCategoryUC(repo database.PSQLDBStore) *categoryUC {
 	return &categoryUC{repo: repo}
 }
 
 func (c *categoryUC) Create(ctx context.Context, category domain.Category) (int, error) {
-	id, err := c.repo.Create(ctx, category)
+	var err error
+	var categoryID int
+
+	err = c.repo.WithTransaction(ctx, func(dataStore database.PSQLDBStore) error {
+		id, err := dataStore.Create(ctx, category)
+		if err != nil {
+			return 0, err
+		}
+
+		categoryID = id
+
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
 
-	return id, nil
+	return categoryID, nil
 }

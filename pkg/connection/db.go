@@ -4,34 +4,42 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"time"
 
-	"github.com/Akmyrat03/shop/internal/config"
 	"github.com/georgysavva/scany/v2/pgxscan"
+	"github.com/i3-MS/post-management/internal/config"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Ensure Database implements DB and DBOps.
 var _ DB = (*Database)(nil)
 
-// Querier defines basic query operations.
+// Querier interface.
 type Querier interface {
 	QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row
 	Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error)
 	Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error)
 }
 
-// DB extends Querier with additional convenience methods.
+// DB interface keeps needed methods for psqlDB.
 type DB interface {
-	Querier
 	Get(ctx context.Context, dest interface{}, query string, args ...interface{}) error
 	Select(ctx context.Context, dest interface{}, query string, args ...interface{}) error
+	Querier
 }
 
+// DBOps interface with Transaction method.
+type DBOps interface {
+	DB
+	Begin(ctx context.Context, txOpts pgx.TxOptions) (TxOps, error)
+	Close()
+}
+
+// Database struct keeps pgxpool.
 type Database struct {
-	Pool *pgxpool.Pool
+	Db *pgxpool.Pool
 }
 
 func NewDBConnection(ctx context.Context, cfg config.PostgresConfig) (*Database, error) {
@@ -48,7 +56,7 @@ func NewDBConnection(ctx context.Context, cfg config.PostgresConfig) (*Database,
 	for i := 0; i < retryAttempts; i++ {
 		db, err = connectToDB(ctx, cfg)
 		if err == nil {
-			return &Database{Pool: db}, nil
+			return &Database{Db: db}, nil
 		}
 
 		time.Sleep(retryDelay)
@@ -60,11 +68,29 @@ func NewDBConnection(ctx context.Context, cfg config.PostgresConfig) (*Database,
 	return nil, fmt.Errorf("failed to connect to db after %d attempts: %w", retryAttempts, err)
 }
 
+// connectToDB func connects to db.
 func connectToDB(ctx context.Context, cfg config.PostgresConfig) (*pgxpool.Pool, error) {
-	config, err := pgxpool.ParseConfig(cfg.GenerateDSN())
+	const (
+		maxConnections = 10
+	)
+
+	hostPort := net.JoinHostPort(cfg.Host, cfg.Port)
+	connStr := fmt.Sprintf(
+		"postgres://%s:%s@%s/%s?sslmode=%s",
+		cfg.User,
+		cfg.Password,
+		hostPort,
+		cfg.DBName,
+		cfg.SslMode,
+	)
+
+	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, fmt.Errorf("parsing connection config: %w", err)
 	}
+
+	// Configure the connection pool settings.
+	config.MaxConns = maxConnections
 
 	// create a new connection pool.
 	db, err := pgxpool.NewWithConfig(ctx, config)
@@ -80,21 +106,31 @@ func connectToDB(ctx context.Context, cfg config.PostgresConfig) (*pgxpool.Pool,
 	return db, nil
 }
 
+// Get func is used for getting single row.
+func (d *Database) Get(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+	return pgxscan.Get(ctx, d.Db, dest, query, args...)
+}
+
+// Select func is used for getting multiple rows.
+func (d *Database) Select(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
+	return pgxscan.Select(ctx, d.Db, dest, query, args...)
+}
+
 // QueryRow func is used for querying single row.
 func (d *Database) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
-	return d.Pool.QueryRow(ctx, query, args...)
+	return d.Db.QueryRow(ctx, query, args...)
 }
 
 // Query func is used for querying multiple rows.
 func (d *Database) Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error) {
-	return d.Pool.Query(ctx, query, args...)
+	return d.Db.Query(ctx, query, args...)
 }
 
 // Exec func is used for executing query.
 func (d *Database) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
-	result, err := d.Pool.Exec(ctx, query, args...)
+	result, err := d.Db.Exec(ctx, query, args...)
 	if err != nil {
-		return pgconn.CommandTag{}, fmt.Errorf("executing query error: %w", err)
+		return pgconn.CommandTag{}, fmt.Errorf("executing query: %w", err)
 	}
 
 	if result.RowsAffected() == 0 {
@@ -104,12 +140,21 @@ func (d *Database) Exec(ctx context.Context, query string, args ...interface{}) 
 	return result, nil
 }
 
-// Get func is used for getting single row.
-func (d *Database) Get(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-	return pgxscan.Get(ctx, d.Pool, dest, query, args...)
+// Begin func is used for starting transaction.
+func (d *Database) Begin(ctx context.Context, txOpts pgx.TxOptions) (TxOps, error) {
+	if d == nil || d.Db == nil {
+		return nil, fmt.Errorf("database connection is nil")
+	}
+
+	tx, err := d.Db.BeginTx(ctx, txOpts)
+	if err != nil {
+		return nil, fmt.Errorf("connection begin transaction: %w", err)
+	}
+
+	return &Transaction{Tx: tx}, nil
 }
 
-// Select func is used for getting multiple rows.
-func (d *Database) Select(ctx context.Context, dest interface{}, query string, args ...interface{}) error {
-	return pgxscan.Select(ctx, d.Pool, dest, query, args...)
+// Close func is used for closing db connection.
+func (d *Database) Close() {
+	d.Db.Close()
 }
